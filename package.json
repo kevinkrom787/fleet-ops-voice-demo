@@ -1,0 +1,33 @@
+{
+  "name": "fleet-ops-voice-demo",
+  "version": "1.0.0",
+  "description": "Mastra + OpenAI Realtime voice agent demo",
+  "private": true,
+  "main": "dist/server.js",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc",
+    "start": "node dist/server.js"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@mastra/core": "^1.61.0",
+    "@mastra/libsql": "^1.21.1",
+    "@mastra/memory": "^1.27.0",
+    "@mastra/voice-openai-realtime": "^0.13.7",
+    "dotenv": "^17.4.2",
+    "express": "^5.2.1",
+    "ws": "^8.21.3",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.2.0",
+    "@types/ws": "^8.18.1",
+    "tsx": "^4.23.12",
+    "typescript": "^7.0.2"
+  }
+}
