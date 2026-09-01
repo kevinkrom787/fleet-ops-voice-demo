@@ -1,7 +1,7 @@
 {
-  "name": "fleet-ops-voice-demo",
+  "name": "black-bear-scheduling-agent",
   "version": "1.0.0",
-  "description": "Mastra + OpenAI Realtime voice agent demo",
+  "description": "Black Bear Exteriors - Mastra + Deepgram voice scheduling agent",
   "private": true,
   "main": "dist/server.js",
   "scripts": {
@@ -17,7 +17,6 @@
     "@mastra/core": "^1.61.0",
     "@mastra/libsql": "^1.21.1",
     "@mastra/memory": "^1.27.0",
-    "@mastra/voice-openai-realtime": "^0.13.7",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
     "ws": "^8.21.3",

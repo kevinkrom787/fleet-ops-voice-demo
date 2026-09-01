@@ -1,140 +1,120 @@
 import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { fleetMemory, WORKING_MEMORY_TEMPLATE } from './memory.js';
-import { diagnosticWorkflow } from './workflows/diagnostic-workflow.js';
-
-export type JobEvent =
-  | { type: 'job-started'; jobId: string; machineId: string }
-  | { type: 'job-step'; jobId: string; step: string }
-  | { type: 'job-completed'; jobId: string; result: unknown }
-  | { type: 'job-failed'; jobId: string; error: string };
+import { leadMemory, WORKING_MEMORY_TEMPLATE } from './memory.js';
+import { calendlyConfigFromEnv, createBookingLink, listAvailableSlots } from '../calendly.js';
 
 export interface SessionHooks {
   threadId: string;
   resourceId: string;
-  onJobEvent: (event: JobEvent) => void;
-  /** Speak proactively into the *live* realtime session - used to report background results. */
-  speak: (text: string) => Promise<void>;
 }
 
-const MOCK_FLEET: Record<string, { name: string; location: string; fuelPct: number; status: string }> = {
-  'EX-4471': { name: 'Excavator EX-4471', location: 'Site B - North Pit', fuelPct: 62, status: 'active' },
-  'DZ-2210': { name: 'Dozer DZ-2210', location: 'Site A - Laydown Yard', fuelPct: 88, status: 'idle' },
-  'HL-3309': { name: 'Haul Truck HL-3309', location: 'Site B - Haul Road 2', fuelPct: 41, status: 'active' },
-};
+function setLine(lines: string[], label: string, value?: string) {
+  if (!value) return;
+  const idx = lines.findIndex((l) => l.trim().startsWith(`- **${label}**`));
+  const text = `- **${label}**: ${value}`;
+  if (idx >= 0) lines[idx] = text;
+  else lines.push(text);
+}
+
+function getLine(lines: string[], label: string): string {
+  const line = lines.find((l) => l.trim().startsWith(`- **${label}**`));
+  if (!line) return '';
+  return line.split(`- **${label}**:`)[1]?.trim() ?? '';
+}
 
 export function createSessionTools(hooks: SessionHooks) {
-  const getMachineStatus = createTool({
-    id: 'getMachineStatus',
-    description:
-      'Look up live status for a piece of equipment by machine ID (fuel level, location, operating status).',
-    inputSchema: z.object({ machineId: z.string().describe('Equipment ID, e.g. EX-4471') }),
-    outputSchema: z.object({
-      machineId: z.string(),
-      found: z.boolean(),
-      name: z.string().optional(),
-      location: z.string().optional(),
-      fuelPct: z.number().optional(),
-      status: z.string().optional(),
-    }),
-    execute: async (inputData) => {
-      const machine = MOCK_FLEET[inputData.machineId];
-      return machine
-        ? { machineId: inputData.machineId, found: true, ...machine }
-        : { machineId: inputData.machineId, found: false };
-    },
-  });
+  const calendlyConfig = calendlyConfigFromEnv();
 
-  const updateOperatorProfile = createTool({
-    id: 'updateOperatorProfile',
+  const readMemory = () =>
+    leadMemory.getWorkingMemory({ threadId: hooks.threadId, resourceId: hooks.resourceId });
+  const writeMemory = (workingMemory: string) =>
+    leadMemory.updateWorkingMemory({ threadId: hooks.threadId, resourceId: hooks.resourceId, workingMemory });
+
+  const saveLeadInfo = createTool({
+    id: 'saveLeadInfo',
     description:
-      "Save or update what's known about the operator and the machine currently being discussed. Call this whenever the operator gives their name, names a machine they're reporting on, or raises an issue worth remembering for later in the call.",
+      'Save or update the caller details. Only call this for a piece of information the caller has ' +
+      'CONFIRMED - read phone numbers and addresses back to them and get a yes first. Call it once per ' +
+      'confirmed piece; you do not need everything at once.',
     inputSchema: z.object({
-      operatorName: z.string().optional(),
-      currentMachine: z.string().optional(),
-      openIssue: z.string().optional(),
+      name: z.string().optional().describe('Full name, once confirmed'),
+      phone: z.string().optional().describe('Phone number, only after reading it back digit by digit and getting a yes'),
+      address: z.string().optional().describe('Service address, only after reading it back and getting a yes'),
+      reasonForCalling: z.string().optional().describe('Why they are calling - the roof/siding/window/gutter issue'),
     }),
     outputSchema: z.object({ saved: z.boolean(), workingMemory: z.string() }),
     execute: async (inputData) => {
-      const existing = await fleetMemory.getWorkingMemory({
-        threadId: hooks.threadId,
-        resourceId: hooks.resourceId,
-      });
-
-      const lines = (existing || WORKING_MEMORY_TEMPLATE).split('\n');
-      const setLine = (label: string, value?: string) => {
-        if (!value) return;
-        const idx = lines.findIndex((l) => l.trim().startsWith(`- **${label}**`));
-        const text = `- **${label}**: ${value}`;
-        if (idx >= 0) lines[idx] = text;
-        else lines.push(text);
-      };
-      setLine('Operator name', inputData.operatorName);
-      setLine('Current machine', inputData.currentMachine);
-      setLine('Open issues', inputData.openIssue);
+      const lines = ((await readMemory()) || WORKING_MEMORY_TEMPLATE).split('\n');
+      setLine(lines, 'Name', inputData.name);
+      setLine(lines, 'Phone', inputData.phone);
+      setLine(lines, 'Address', inputData.address);
+      setLine(lines, 'Reason for calling', inputData.reasonForCalling);
       const workingMemory = lines.join('\n');
-
-      await fleetMemory.updateWorkingMemory({
-        threadId: hooks.threadId,
-        resourceId: hooks.resourceId,
-        workingMemory,
-      });
-
+      await writeMemory(workingMemory);
       return { saved: true, workingMemory };
     },
   });
 
-  const runDiagnosticScan = createTool({
-    id: 'runDiagnosticScan',
+  const checkAvailability = createTool({
+    id: 'checkAvailability',
     description:
-      'Kick off a full diagnostic scan on a piece of equipment (pulls telemetry, analyzes wear). Takes several seconds - acknowledge to the operator that the scan is running and keep talking with them, you will be given the results once the scan completes.',
+      'Look up open appointment slots on the Black Bear Exteriors free-estimate calendar for the next ' +
+      'several days. Only offer times this tool actually returns - never invent a time.',
     inputSchema: z.object({
-      machineId: z.string(),
-      issueDescription: z.string().optional().describe('What the operator reported, if anything'),
+      daysAhead: z.number().optional().describe('How many days ahead to search (max 6, default 6)'),
     }),
-    outputSchema: z.object({ status: z.literal('started'), jobId: z.string() }),
-    // The realtime-voice tool-call path awaits `execute()` directly rather than
-    // routing through Mastra's background-task manager (that manager only wires
-    // into the generate()/stream() agentic loop) - so we return fast and run the
-    // workflow ourselves below, reporting back via voice.speak() when it lands.
-    background: { enabled: true },
+    outputSchema: z.object({
+      slots: z.array(z.object({ label: z.string(), startTimeIso: z.string() })),
+    }),
     execute: async (inputData) => {
-      const jobId = `job-${Date.now()}`;
-      hooks.onJobEvent({ type: 'job-started', jobId, machineId: inputData.machineId });
-
-      void (async () => {
-        try {
-          const run = await diagnosticWorkflow.createRun();
-          run.watch((event) => {
-            if (event.type === 'workflow-step-start') {
-              hooks.onJobEvent({ type: 'job-step', jobId, step: event.payload.id });
-            }
-          });
-          const result = await run.start({
-            inputData: { machineId: inputData.machineId, issueDescription: inputData.issueDescription },
-          });
-
-          if (result.status === 'success') {
-            hooks.onJobEvent({ type: 'job-completed', jobId, result: result.result });
-            const r = result.result;
-            await hooks.speak(
-              `Diagnostic scan complete for ${r.machineId}. ${r.summary} Severity: ${r.severity}. Recommendation: ${r.recommendation}`,
-            );
-          } else {
-            const error = result.status === 'failed' ? result.error.message : result.status;
-            hooks.onJobEvent({ type: 'job-failed', jobId, error });
-            await hooks.speak(`The diagnostic scan on ${inputData.machineId} did not complete: ${error}`);
-          }
-        } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
-          hooks.onJobEvent({ type: 'job-failed', jobId, error: message });
-          await hooks.speak(`I ran into an error running diagnostics on ${inputData.machineId}: ${message}`);
-        }
-      })();
-
-      return { status: 'started' as const, jobId };
+      const slots = await listAvailableSlots(calendlyConfig, { days: inputData.daysAhead, limit: 5 });
+      return { slots };
     },
   });
 
-  return { getMachineStatus, updateOperatorProfile, runDiagnosticScan };
+  const scheduleEstimate = createTool({
+    id: 'scheduleEstimate',
+    description:
+      "Finalize the appointment once the caller has picked a time from checkAvailability's results. " +
+      'Requires name, phone, address, and reason for calling to already be saved via saveLeadInfo - it ' +
+      'will tell you what is missing if not. Generates a booking link and saves the choice to the lead record.',
+    inputSchema: z.object({
+      chosenSlotLabel: z
+        .string()
+        .describe('The human-readable slot the caller picked, e.g. "Tuesday, September 8 at 2:00 PM EDT"'),
+    }),
+    outputSchema: z.object({
+      booked: z.boolean(),
+      missing: z.array(z.string()).optional(),
+      bookingUrl: z.string().optional(),
+      confirmationSummary: z.string().optional(),
+    }),
+    execute: async (inputData) => {
+      const lines = ((await readMemory()) || WORKING_MEMORY_TEMPLATE).split('\n');
+
+      const required: Array<[string, string]> = [
+        ['Name', 'name'],
+        ['Phone', 'phone'],
+        ['Address', 'address'],
+        ['Reason for calling', 'reason for calling'],
+      ];
+      const missing = required.filter(([label]) => !getLine(lines, label)).map(([, human]) => human);
+      if (missing.length > 0) {
+        return { booked: false, missing };
+      }
+
+      const bookingUrl = await createBookingLink(calendlyConfig);
+      setLine(lines, 'Requested appointment', inputData.chosenSlotLabel);
+      setLine(lines, 'Booking link', bookingUrl);
+      await writeMemory(lines.join('\n'));
+
+      return {
+        booked: true,
+        bookingUrl,
+        confirmationSummary: `You're penciled in for ${inputData.chosenSlotLabel}. I'm sending over a confirmation link to lock it in.`,
+      };
+    },
+  });
+
+  return { saveLeadInfo, checkAvailability, scheduleEstimate };
 }

@@ -3,7 +3,6 @@ const statusDot = document.getElementById('statusDot');
 const statusText = document.getElementById('statusText');
 const transcriptEl = document.getElementById('transcript');
 const toolLogEl = document.getElementById('toolLog');
-const jobLogEl = document.getElementById('jobLog');
 const memoryViewEl = document.getElementById('memoryView');
 
 let ws = null;
@@ -14,9 +13,9 @@ let micNode = null;
 let playbackContext = null;
 let playbackCursor = 0;
 let memoryPollTimer = null;
+let activeSources = [];
 
 const bubbleByItemId = new Map();
-const jobs = new Map();
 
 function setStatus(status, label) {
   statusDot.className = `status-dot ${status}`;
@@ -38,7 +37,7 @@ function appendTranscript({ text, role, response_id }) {
     bubble.className = `bubble ${role}`;
     const roleLabel = document.createElement('span');
     roleLabel.className = 'role';
-    roleLabel.textContent = role === 'user' ? 'Operator' : 'Fleet Ops Agent';
+    roleLabel.textContent = role === 'user' ? 'Caller' : 'Scheduling Agent';
     const body = document.createElement('span');
     body.className = 'body';
     bubble.appendChild(roleLabel);
@@ -65,49 +64,17 @@ function appendToolLog(entry) {
     pre.textContent = `result: ${JSON.stringify(entry.result)}`;
     div.appendChild(pre);
   }
+  if (entry.result?.bookingUrl) {
+    const link = document.createElement('a');
+    link.href = entry.result.bookingUrl;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.className = 'booking-link';
+    link.textContent = 'Open confirmation link →';
+    div.appendChild(link);
+  }
   toolLogEl.prepend(div);
-  if (entry.toolName === 'updateOperatorProfile' && entry.result) refreshMemory();
-}
-
-function renderJob(jobId) {
-  const job = jobs.get(jobId);
-  if (!job) return;
-  if (!job.el) {
-    if (jobLogEl.querySelector('.empty')) jobLogEl.innerHTML = '';
-    job.el = document.createElement('div');
-    job.el.className = 'log-entry job-entry';
-    jobLogEl.prepend(job.el);
-  }
-  job.el.className = `log-entry job-entry ${job.status}`;
-  const steps = ['pull-telemetry', 'analyze-and-recommend'];
-  const stepsHtml = steps
-    .map((s) => `<span class="job-step ${job.completedSteps.has(s) ? 'done' : ''}">${s}</span>`)
-    .join('');
-  job.el.innerHTML = `
-    <span class="name">Diagnostic scan · ${job.machineId}</span>
-    <div class="job-steps">${stepsHtml}</div>
-    ${job.resultText ? `<pre>${job.resultText}</pre>` : ''}
-  `;
-}
-
-function handleJobEvent(evt) {
-  let job = jobs.get(evt.jobId);
-  if (!job) {
-    job = { machineId: evt.machineId ?? '?', status: 'running', completedSteps: new Set(), resultText: '' };
-    jobs.set(evt.jobId, job);
-  }
-  if (evt.type === 'job-step') job.completedSteps.add(evt.step);
-  if (evt.type === 'job-completed') {
-    job.status = 'completed';
-    job.completedSteps.add('pull-telemetry').add('analyze-and-recommend');
-    const r = evt.result;
-    job.resultText = `${r.summary}\nSeverity: ${r.severity}\n${r.recommendation}`;
-  }
-  if (evt.type === 'job-failed') {
-    job.status = 'failed';
-    job.resultText = `Error: ${evt.error}`;
-  }
-  renderJob(evt.jobId);
+  if ((entry.toolName === 'saveLeadInfo' || entry.toolName === 'scheduleEstimate') && entry.result) refreshMemory();
 }
 
 async function refreshMemory() {
@@ -140,7 +107,25 @@ function playPcm16(arrayBuffer) {
 
   const startAt = Math.max(playbackContext.currentTime, playbackCursor);
   source.start(startAt);
+  activeSources.push(source);
+  source.onended = () => {
+    activeSources = activeSources.filter((s) => s !== source);
+  };
   playbackCursor = startAt + buffer.duration;
+}
+
+// Barge-in: Deepgram tells us the user started talking over the agent - stop whatever
+// agent audio is currently playing/queued so playback doesn't lag behind the live turn.
+function flushPlayback() {
+  activeSources.forEach((s) => {
+    try {
+      s.stop();
+    } catch {
+      // already stopped/ended - fine to ignore
+    }
+  });
+  activeSources = [];
+  if (playbackContext) playbackCursor = playbackContext.currentTime;
 }
 
 async function initMic() {
@@ -166,6 +151,7 @@ function teardownAudio() {
   micContext = null;
   micNode = null;
   playbackContext = null;
+  activeSources = [];
 }
 
 async function connect() {
@@ -206,14 +192,14 @@ async function connect() {
         case 'transcript':
           appendTranscript(msg);
           break;
+        case 'user-speaking':
+          flushPlayback();
+          break;
         case 'tool-start':
           appendToolLog({ toolName: msg.toolName, args: msg.args });
           break;
         case 'tool-result':
           appendToolLog({ toolName: msg.toolName, args: msg.args, result: msg.result });
-          break;
-        case 'job':
-          handleJobEvent(msg);
           break;
         case 'error':
           console.error('[server]', msg.message);

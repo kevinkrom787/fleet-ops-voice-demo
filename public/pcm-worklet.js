@@ -1,5 +1,5 @@
 // Downsamples mic input (native AudioContext sample rate, e.g. 48000) to the
-// 24kHz mono PCM16 that OpenAI's Realtime API expects, and batches samples
+// 24kHz mono PCM16 that Deepgram's Voice Agent API expects, and batches samples
 // before posting them to the main thread to keep message traffic reasonable.
 class PCMCaptureProcessor extends AudioWorkletProcessor {
   constructor() {
