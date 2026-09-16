@@ -13,3 +13,9 @@ Technical AEs who can sell, demo, and actually deploy something real feel rare. 
 Evals:
 <img width="1471" height="721" alt="Screenshot 2026-09-16 at 1 49 16 PM" src="https://github.com/user-attachments/assets/ace1d619-4dec-469d-b7ff-4d2a3a4418ea" />
 
+to run:
+git clone https://github.com/kevinkrom787/fleet-ops-voice-demo.git
+cd fleet-ops-voice-demo
+cp .env.example .env
+npm install
+npm run dev
