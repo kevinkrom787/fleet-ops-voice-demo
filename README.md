@@ -15,10 +15,12 @@ Evals:
 
 ## Try it
 
-\`\`\`
+```
 git clone https://github.com/kevinkrom787/fleet-ops-voice-demo.git
 cd fleet-ops-voice-demo
 cp .env.example .env
 npm install
 npm run dev
-\`\`\`
+```
+
+Add a `DEEPGRAM_API_KEY` to `.env` (free account at deepgram.com - the only key required), open `localhost:3000`, hit Connect.
