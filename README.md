@@ -1,6 +1,6 @@
 # Deepgram Voice Agent
 
-Built this to actually get hands-on with Deepgram's Voice Agent API before talking to the team - not just read about it.
+Built this to actually get hands-on with Deepgram's Voice Agent API before talking to the team, not just read about it.
 
 <img width="1440" height="819" alt="Screenshot 2026-09-16 at 1 47 55 PM" src="https://github.com/user-attachments/assets/9d6a4510-eee3-4816-8c69-f33c7266baed" />
 
