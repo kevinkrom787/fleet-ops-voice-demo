@@ -13,10 +13,17 @@
       <span class="brand-mark">🐻</span>
       <div>
         <h1>Black Bear Exteriors — Scheduling Agent</h1>
-        <p class="subtitle">Mastra + Deepgram Voice Agent — lead capture and Calendly booking, live over voice</p>
+        <p class="subtitle">Deepgram Voice Agent — lead capture and Calendly booking, live over voice, no agent framework</p>
       </div>
     </div>
     <div class="controls">
+      <a href="/scorecards.html" style="color: var(--muted); font-size: 13px; margin-right: 12px;">Call scorecards →</a>
+      <a href="/auth-demo.html" style="color: var(--muted); font-size: 13px; margin-right: 8px;">Track A/B auth demo →</a>
+      <label for="listenModelSelect" class="hint" style="margin-right: 4px;">Listen model</label>
+      <select id="listenModelSelect">
+        <option value="flux-general-en">Flux (semantic EOT)</option>
+        <option value="nova-3">Nova-3 (baseline, silence VAD)</option>
+      </select>
       <span id="statusDot" class="status-dot disconnected"></span>
       <span id="statusText" class="status-text">Disconnected</span>
       <button id="connectBtn">Connect</button>
@@ -30,6 +37,17 @@
     </section>
 
     <aside class="side-column">
+      <section class="panel">
+        <h2>Live Call Metrics <span class="hint">(deterministic — quality/hallucination scored after the call, see /scorecards.html)</span></h2>
+        <dl class="metrics-grid">
+          <dt>Listening with</dt><dd id="metricListenModel">—</dd>
+          <dt>Duration</dt><dd id="metricDuration">0:00</dd>
+          <dt>Tool calls</dt><dd id="metricToolCalls">0</dd>
+          <dt>Avg latency</dt><dd id="metricLatency">—</dd>
+          <dt>Est. cost so far</dt><dd id="metricCost">$0.0000</dd>
+        </dl>
+      </section>
+
       <section class="panel">
         <h2>Tool Calls</h2>
         <div id="toolLog" class="log"><p class="empty">No tool calls yet.</p></div>

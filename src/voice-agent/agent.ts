@@ -48,6 +48,11 @@ Once you have the whole thing, repeat it back once as a question, then save it.
   ask for that naturally, then try again.
 - Once it's booked, tell them the day and time and that they're all set.
 
+## Other tools
+- If someone asks which account or organization this call is under, call whatOrgAmIIn.
+- If someone brings up something urgent or off-script that a human should actually look at (a safety
+  issue, a complaint), call flagForHumanFollowUp with a one-sentence reason, then get back to booking.
+
 ## How to talk
 - Short, casual, one thing at a time. Contractions always. It's a phone call, not an email.
 - React like a person: "ah man, that's no good" when they describe damage, "yeah, easy" when
@@ -68,13 +73,13 @@ Once you have the whole thing, repeat it back once as a question, then save it.
 
 const GREETING = "Thanks for calling Black Bear Exteriors - what's going on, how can we help?";
 
-// This app doesn't wrap a Mastra `Agent` - that abstraction only earned its keep via
-// `.getVoice()`, and Mastra has no voice provider for Deepgram's Voice Agent API (a single
-// realtime speech-to-speech socket, like OpenAI's Realtime API). The tools (createTool) and
-// working memory (@mastra/memory) are still real Mastra primitives - see tools.ts and memory.ts.
-export function createSchedulingVoiceAgent(hooks: SessionHooks) {
+// No agent framework here - Deepgram's own orchestrator (listen -> think -> speak,
+// FunctionCallRequest/Response for tool calling) is the entire agent loop. See
+// src/voice-agent/tool.ts and memory.ts for what "tools" and "memory" reduce to
+// once you strip an agent framework away: a type and a SQLite table.
+export function createSchedulingVoiceAgent(hooks: SessionHooks, options?: { listenModel?: string }) {
   const tools = createSessionTools(hooks);
-  return new DeepgramVoiceAgent({
+  const agent = new DeepgramVoiceAgent({
     apiKey: process.env.DEEPGRAM_API_KEY ?? '',
     instructions: INSTRUCTIONS,
     greeting: GREETING,
@@ -92,9 +97,10 @@ export function createSchedulingVoiceAgent(hooks: SessionHooks) {
     // Flux (v2) has model-integrated semantic end-of-turn - it knows you're done by what you said,
     // not by waiting out a fixed silence gap like Nova's VAD. This is the main fix for laggy
     // turn-taking. eager_eot lets the LLM start a beat early; eot_timeout caps trailing silence.
-    // Fallback to Nova: set DEEPGRAM_LISTEN_MODEL=nova-3.
+    // `options.listenModel` lets the browser pick per-session (the A/B demo toggle in the UI -
+    // see public/app.js) without restarting the server; env var is the fallback default.
     listen: {
-      model: process.env.DEEPGRAM_LISTEN_MODEL || 'flux-general-en',
+      model: options?.listenModel || process.env.DEEPGRAM_LISTEN_MODEL || 'flux-general-en',
       eotThreshold: Number(process.env.DEEPGRAM_EOT_THRESHOLD) || 0.7,
       eagerEotThreshold: Number(process.env.DEEPGRAM_EAGER_EOT_THRESHOLD) || 0.6,
       eotTimeoutMs: Number(process.env.DEEPGRAM_EOT_TIMEOUT_MS) || 3000,
@@ -104,4 +110,29 @@ export function createSchedulingVoiceAgent(hooks: SessionHooks) {
     // For genuinely lifelike delivery you'd switch to ElevenLabs/Cartesia (needs a BYO key).
     speakModel: process.env.DEEPGRAM_SPEAK_MODEL || 'aura-2-vesta-en',
   });
+
+  // Mid-session prompt update demo: once scheduleEstimate succeeds, append one
+  // instruction for the rest of THIS call only - no redeploy, no new Settings
+  // message, no restating the whole persona. UpdatePrompt appends rather than
+  // replacing (see deepgram-voice.ts), which is exactly what this needs: the
+  // original prompt still applies, we're just adding a constraint on top of it.
+  //
+  // Found by testing a real call: firing this synchronously (the instant the
+  // tool returns, BEFORE its FunctionCallResponse even reaches Deepgram) races
+  // the agent's in-flight response to that same tool call - Deepgram was still
+  // composing/speaking the booking confirmation when the prompt changed under
+  // it, and the reply fragmented into several separate ConversationText turns
+  // ("Perfect." / "You're all set..." / "Someone'll be out...") instead of
+  // one. Waiting for AgentAudioDone confirms the current turn finished
+  // speaking before we change the prompt for the next one.
+  hooks.onBooked = () => {
+    agent.once('agent-audio-done', () => {
+      void agent.updatePrompt(
+        "The estimate is booked and confirmed for this call - don't offer to book another one. If " +
+          "scheduling comes up again, just confirm it's already on the books and move the call to a close.",
+      );
+    });
+  };
+
+  return agent;
 }

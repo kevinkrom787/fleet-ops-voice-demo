@@ -4,6 +4,12 @@ const statusText = document.getElementById('statusText');
 const transcriptEl = document.getElementById('transcript');
 const toolLogEl = document.getElementById('toolLog');
 const memoryViewEl = document.getElementById('memoryView');
+const listenModelSelect = document.getElementById('listenModelSelect');
+const metricListenModelEl = document.getElementById('metricListenModel');
+const metricDurationEl = document.getElementById('metricDuration');
+const metricToolCallsEl = document.getElementById('metricToolCalls');
+const metricLatencyEl = document.getElementById('metricLatency');
+const metricCostEl = document.getElementById('metricCost');
 
 let ws = null;
 let voiceReady = false;
@@ -14,6 +20,42 @@ let playbackContext = null;
 let playbackCursor = 0;
 let memoryPollTimer = null;
 let activeSources = [];
+
+// Live Call Metrics state - deterministic-only (see LEARNING.md #13): quality/
+// hallucination/competitor need a full transcript, so they're intentionally
+// NOT shown live - check /scorecards.html once the call ends for those.
+let callStartTime = null;
+let metricsTimer = null;
+let toolCallCount = 0;
+const latencySamplesMs = [];
+
+// Mirrors src/scoring/cost.ts's DEEPGRAM_VOICE_AGENT_RATE_PER_MIN.standard -
+// duplicated here so the running cost can tick client-side without a round
+// trip; the authoritative estimate still comes from the server at call end.
+const COST_PER_MIN_USD = 0.075;
+
+function resetLiveMetrics() {
+  callStartTime = null;
+  toolCallCount = 0;
+  latencySamplesMs.length = 0;
+  metricDurationEl.textContent = '0:00';
+  metricToolCallsEl.textContent = '0';
+  metricLatencyEl.textContent = '—';
+  metricCostEl.textContent = '$0.0000';
+}
+
+function updateLiveMetrics() {
+  if (!callStartTime) return;
+  const elapsedMs = Date.now() - callStartTime;
+  const totalSeconds = Math.floor(elapsedMs / 1000);
+  metricDurationEl.textContent = `${Math.floor(totalSeconds / 60)}:${String(totalSeconds % 60).padStart(2, '0')}`;
+  metricCostEl.textContent = `$${((elapsedMs / 60000) * COST_PER_MIN_USD).toFixed(4)}`;
+  metricToolCallsEl.textContent = String(toolCallCount);
+  if (latencySamplesMs.length) {
+    const avg = Math.round(latencySamplesMs.reduce((a, b) => a + b, 0) / latencySamplesMs.length);
+    metricLatencyEl.textContent = `${avg} ms`;
+  }
+}
 
 const bubbleByItemId = new Map();
 
@@ -157,6 +199,7 @@ function teardownAudio() {
 async function connect() {
   setStatus('connecting', 'Connecting…');
   connectBtn.disabled = true;
+  resetLiveMetrics();
 
   try {
     await initMic();
@@ -168,7 +211,9 @@ async function connect() {
   }
 
   const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
-  ws = new WebSocket(`${protocol}://${location.host}/ws`);
+  const listenModel = listenModelSelect.value;
+  listenModelSelect.disabled = true;
+  ws = new WebSocket(`${protocol}://${location.host}/ws?listen=${encodeURIComponent(listenModel)}`);
   ws.binaryType = 'arraybuffer';
 
   ws.onopen = () => {
@@ -187,6 +232,9 @@ async function connect() {
             connectBtn.classList.add('connected');
             refreshMemory();
             memoryPollTimer = setInterval(refreshMemory, 4000);
+            metricListenModelEl.textContent = msg.listenModel === 'nova-3' ? 'Nova-3 (baseline)' : 'Flux (semantic EOT)';
+            callStartTime = Date.now();
+            metricsTimer = setInterval(updateLiveMetrics, 500);
           }
           break;
         case 'transcript':
@@ -200,6 +248,15 @@ async function connect() {
           break;
         case 'tool-result':
           appendToolLog({ toolName: msg.toolName, args: msg.args, result: msg.result });
+          toolCallCount += 1;
+          break;
+        case 'latency':
+          // total_latency only - the other LatencyReport fields (stt_latency,
+          // ttt_*, tts_latency) are sub-metrics in seconds; mixing them in and
+          // rounding to ms collapsed everything to 0. total_latency (seconds,
+          // converted to ms here) is the one number that maps to "does this
+          // feel laggy" - see the same fix in src/scoring/recorder.ts.
+          if (typeof msg.total_latency === 'number') latencySamplesMs.push(msg.total_latency * 1000);
           break;
         case 'error':
           console.error('[server]', msg.message);
@@ -223,6 +280,8 @@ function disconnect() {
   voiceReady = false;
   clearInterval(memoryPollTimer);
   memoryPollTimer = null;
+  clearInterval(metricsTimer);
+  metricsTimer = null;
   if (ws) {
     ws.onclose = null;
     ws.close();
@@ -233,6 +292,7 @@ function disconnect() {
   connectBtn.textContent = 'Connect';
   connectBtn.classList.remove('connected');
   connectBtn.disabled = false;
+  listenModelSelect.disabled = false;
 }
 
 connectBtn.addEventListener('click', () => {

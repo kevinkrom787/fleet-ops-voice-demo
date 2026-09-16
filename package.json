@@ -1,28 +1,33 @@
 {
-  "name": "black-bear-scheduling-agent",
+  "name": "workos-deepgram-interview-prep",
   "version": "1.0.0",
-  "description": "Black Bear Exteriors - Mastra + Deepgram voice scheduling agent",
+  "description": "Three tracks in one repo: WorkOS AuthKit (Track A), hand-rolled email+password auth (Track B), and a Deepgram Voice Agent demo (Track C)",
   "private": true,
   "main": "dist/server.js",
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
-    "start": "node dist/server.js"
+    "start": "node dist/server.js",
+    "dump:workos": "tsx src/workos/dump-claims.ts"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "type": "module",
   "dependencies": {
-    "@mastra/core": "^1.61.0",
-    "@mastra/libsql": "^1.21.1",
-    "@mastra/memory": "^1.27.0",
+    "@anthropic-ai/sdk": "^0.126.0",
+    "@workos-inc/node": "^10.13.0",
+    "bcryptjs": "^3.0.3",
+    "cookie-parser": "^1.4.7",
     "dotenv": "^17.4.2",
     "express": "^5.2.1",
+    "jose": "^6.2.12",
     "ws": "^8.21.3",
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.10",
     "@types/express": "^5.0.6",
     "@types/node": "^26.2.0",
     "@types/ws": "^8.18.1",

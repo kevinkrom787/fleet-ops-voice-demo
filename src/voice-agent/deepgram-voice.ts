@@ -2,8 +2,8 @@ import { EventEmitter } from 'node:events';
 import { randomUUID } from 'node:crypto';
 import { WebSocket, type RawData } from 'ws';
 import { z } from 'zod';
-import type { ToolSet } from '@mastra/core/tools';
-type AnyTool = ToolSet[string];
+import type { VoiceTool } from './tool.js';
+type AnyTool = VoiceTool;
 
 const AGENT_WS_URL = 'wss://agent.deepgram.com/v1/agent/converse';
 
@@ -30,7 +30,7 @@ export interface DeepgramVoiceAgentConfig {
   apiKey: string;
   instructions: string;
   greeting?: string;
-  tools: ToolSet;
+  tools: Record<string, VoiceTool>;
   inputSampleRate?: number;
   outputSampleRate?: number;
   listen?: DeepgramListenConfig;
@@ -45,16 +45,19 @@ export interface DeepgramVoiceAgentConfig {
 
 /**
  * Thin client for Deepgram's Voice Agent API (wss://agent.deepgram.com/v1/agent/converse) -
- * a single realtime speech-to-speech socket (STT + LLM + TTS), analogous to the
- * `OpenAIRealtimeVoice` this replaced. Mastra has no wrapper for this API, so this is a
- * hand-rolled `EventEmitter` shaped to match what src/server.ts already expects
- * (`speaking` / `writing` / `tool-call-start` / `tool-call-result` / `error`), plus a
- * `user-speaking` event for client-side barge-in handling.
+ * a single realtime speech-to-speech socket (STT + LLM + TTS). No agent framework sits on
+ * top of this: this class *is* the orchestration layer for this app - a hand-rolled
+ * `EventEmitter` shaped to match what src/server.ts expects (`speaking` / `writing` /
+ * `tool-call-start` / `tool-call-result` / `error`), plus `user-speaking` for client-side
+ * barge-in and `closed`/`latency` for the call-scoring pipeline (see src/scoring/).
  *
- * Tool calling: function definitions are derived from the Mastra tools passed in
+ * Tool calling: function definitions are derived from the VoiceTool objects passed in
  * (`tool.id` / `tool.description` / `z.toJSONSchema(tool.inputSchema)`) and declared as
  * client-side functions. When Deepgram sends `FunctionCallRequest`, the matching tool's
- * `execute()` runs here and the result is returned via `FunctionCallResponse`.
+ * `execute()` runs here and the result is returned via `FunctionCallResponse` - Deepgram's
+ * orchestrator sequences all of this (SettingsApplied -> AgentThinking ->
+ * FunctionCallRequest -> FunctionCallResponse -> AgentStartedSpeaking), which is the whole
+ * reason no separate agent framework is needed here.
  */
 export class DeepgramVoiceAgent extends EventEmitter {
   private ws: WebSocket | null = null;
@@ -110,6 +113,10 @@ export class DeepgramVoiceAgent extends EventEmitter {
 
       ws.on('close', (code, reason) => {
         this.stopKeepAlive();
+        // Fed to the scoring pipeline's reliability metric (src/scoring/) - a clean
+        // close is code 1000; anything else (or a close before Deepgram ever said
+        // SettingsApplied) counts as the session "falling down."
+        this.emit('closed', { code, reason: reason.toString() });
         if (!settled) fail(new Error(`connection closed before settings applied (${code} ${reason})`));
       });
     });
@@ -159,13 +166,26 @@ export class DeepgramVoiceAgent extends EventEmitter {
     };
   }
 
+  /**
+   * Every message type the orchestrator can send, logged to the console so you can
+   * watch listen -> think -> speak happen turn by turn while the app runs. This is
+   * the full server-to-client vocabulary as of the current API:
+   * Welcome, SettingsApplied, ListenUpdated, ThinkUpdated, PromptUpdated, SpeakUpdated,
+   * ConversationText, UserStartedSpeaking, AgentThinking, AgentStartedSpeaking,
+   * AgentAudioDone, FunctionCallRequest, FunctionCallCancelled, LatencyReport,
+   * History, Audio (binary, handled separately in connect()), Warning, Error.
+   */
   private handleMessage(msg: Record<string, unknown>, onSettingsApplied: () => void) {
     switch (msg.type) {
       case 'SettingsApplied':
+        console.log('[voice:SettingsApplied]');
         this.startKeepAlive();
         onSettingsApplied();
         break;
       case 'ConversationText':
+        // The transcript, one message at a time - role:'user' is what STT (listen)
+        // heard, role:'assistant' is what the LLM (think) decided to say next.
+        console.log(`[voice:ConversationText] ${msg.role}: ${msg.content}`);
         this.emit('writing', {
           role: msg.role === 'user' ? 'user' : 'assistant',
           text: String(msg.content ?? ''),
@@ -173,21 +193,66 @@ export class DeepgramVoiceAgent extends EventEmitter {
         });
         break;
       case 'UserStartedSpeaking':
+        // Turn-taking signal from listen: the user has started talking, possibly
+        // over the agent. We don't send anything back to Deepgram for this - it
+        // already stops generating/streaming agent audio on its own. Our job is
+        // purely client-side: tell the browser to stop *playing* whatever audio
+        // it already received and queued (see 'user-speaking' handling in
+        // server.ts -> public/app.js's flushPlayback()). That's the actual
+        // "clear media buffer" step for a hand-rolled client; the official SDKs
+        // just wrap the same idea in a clearMediaBuffer() helper.
+        console.log('[voice:UserStartedSpeaking] (barge-in - client flushes queued audio)');
         this.emit('user-speaking');
+        break;
+      case 'AgentThinking':
+        // The 'think' stage has started reasoning about a response. No content
+        // is provided (that's not a "chain of thought" leak) - it's purely a
+        // timing signal, useful for e.g. showing a "..." indicator in a UI.
+        console.log('[voice:AgentThinking]');
+        break;
+      case 'AgentStartedSpeaking':
+        console.log('[voice:AgentStartedSpeaking] (speak stage began streaming audio)');
+        break;
+      case 'AgentAudioDone':
+        console.log('[voice:AgentAudioDone] (speak stage finished this turn)');
+        // Emitted so callers can safely defer a follow-up action (like
+        // updatePrompt()) until the CURRENT turn is fully spoken - see the
+        // comment on hooks.onBooked in agent.ts for why that ordering matters.
+        this.emit('agent-audio-done');
+        break;
+      case 'PromptUpdated':
+        console.log('[voice:PromptUpdated] (server confirmed our UpdatePrompt was applied)');
+        break;
+      case 'History':
+        // Full conversation history the server is tracking (text + function-call
+        // records) - useful to log once near the end of a session to sanity-check
+        // that what the LLM "remembers" matches the transcript you saw.
+        console.log('[voice:History]', JSON.stringify(msg.messages ?? msg, null, 2));
+        break;
+      case 'LatencyReport':
+        console.log('[voice:LatencyReport]', msg);
+        this.emit('latency', msg);
         break;
       case 'FunctionCallRequest': {
         const calls = (msg.functions as Array<Record<string, unknown>>) ?? [];
+        console.log(`[voice:FunctionCallRequest] ${calls.map((c) => c.name).join(', ')}`);
         void this.handleFunctionCalls(calls);
         break;
       }
+      case 'FunctionCallCancelled':
+        console.log('[voice:FunctionCallCancelled]', msg);
+        break;
       case 'Warning':
+        console.warn('[voice:Warning]', msg.description ?? msg);
         this.emit('error', new Error(`Deepgram warning: ${msg.description ?? JSON.stringify(msg)}`));
         break;
       case 'Error':
+        console.error('[voice:Error]', msg.description ?? msg);
         this.emit('error', new Error(`Deepgram error: ${msg.description ?? JSON.stringify(msg)}`));
         break;
       default:
-        // Welcome, AgentThinking, AgentStartedSpeaking, AgentAudioDone, etc. - no-ops here.
+        // Welcome and any future/undocumented message types land here.
+        console.log(`[voice:${String(msg.type)}]`, msg);
         break;
     }
   }
@@ -209,7 +274,7 @@ export class DeepgramVoiceAgent extends EventEmitter {
       try {
         const tool = this.toolsByName.get(name);
         if (!tool) throw new Error(`Unknown function: ${name}`);
-        result = await (tool.execute as (input: Record<string, unknown>, context?: unknown) => Promise<unknown>)(args, {});
+        result = await (tool.execute as (input: Record<string, unknown>) => Promise<unknown>)(args);
       } catch (err) {
         result = { error: err instanceof Error ? err.message : String(err) };
       }
@@ -228,6 +293,18 @@ export class DeepgramVoiceAgent extends EventEmitter {
   /** Proactively make the agent say something mid-session (used to report background job results). */
   async speak(text: string) {
     this.sendJSON({ type: 'InjectAgentMessage', message: text, behavior: 'interrupt' });
+  }
+
+  /**
+   * Mid-session prompt update. IMPORTANT: per Deepgram's docs, UpdatePrompt
+   * *appends to* the existing system prompt - it does not replace it. So this
+   * is for adding a rule/instruction for the rest of the call (a phase change,
+   * a hand-off, "the booking is done now, stop trying to rebook"), not for
+   * swapping the agent's entire persona. If you need a full persona swap,
+   * that's a new session with a fresh Settings message, not UpdatePrompt.
+   */
+  async updatePrompt(additionalInstructions: string) {
+    this.sendJSON({ type: 'UpdatePrompt', prompt: additionalInstructions });
   }
 
   close() {

@@ -1,0 +1,168 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Call Scorecards</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/styles.css" />
+  <style>
+    main.scorecards { max-width: 1440px; margin: 0 auto; padding: 22px 24px; }
+    .intro { color: #a9b0bd; font-size: 14px; max-width: 920px; margin: 0 0 10px; line-height: 1.6; }
+    .buckets { display: flex; gap: 16px; flex-wrap: wrap; margin: 0 0 20px; font-size: 13px; color: #a9b0bd; }
+    .buckets b { color: var(--text); }
+    .table-scroll { overflow-x: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.45; }
+    th, td { text-align: left; padding: 12px 14px; border-bottom: 1px solid var(--panel-border); vertical-align: top; white-space: nowrap; }
+    td.wrap, .detail { white-space: normal; }
+    th { color: #a9b0bd; text-transform: uppercase; letter-spacing: 0.04em; font-size: 11.5px; font-weight: 700; }
+    thead tr.bucket-row th {
+      font-size: 11px; letter-spacing: 0.06em; color: #7d8496; background: #171a21;
+      border-bottom: 1px solid var(--panel-border); padding: 7px 14px 5px;
+    }
+    tr:hover td { background: #14161c; }
+    .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 12.5px; font-weight: 700; }
+    .pill.ok { background: #123321; color: var(--ok); }
+    .pill.bad { background: #3a1616; color: var(--danger); }
+    .pill.warn { background: #3a2f10; color: var(--accent); }
+    .pill.neutral { background: #1d2029; color: #a9b0bd; }
+    .score { font-weight: 800; font-size: 15px; }
+    .score.s5, .score.s4 { color: var(--ok); }
+    .score.s3 { color: var(--accent); }
+    .score.s2, .score.s1 { color: var(--danger); }
+    /* The judge is instructed to keep rationale/details to one short phrase (~20
+       words), so full text almost always fits comfortably at this width - no
+       clamping needed now that the source is actually short. Full text is also
+       in the title attribute (hover) as a fallback for the rare long one. */
+    .detail { color: #9298a6; font-size: 12.5px; margin-top: 4px; max-width: 260px; line-height: 1.4; }
+    .tool-tag { display: inline-block; background: #1d2029; color: #c2c8d4; border: 1px solid var(--panel-border); border-radius: 6px; padding: 2px 8px; font-size: 12px; margin: 2px 3px 2px 0; }
+    .empty-state { color: #a9b0bd; font-size: 14px; padding: 48px 0; text-align: center; }
+    a.link { color: var(--accent); }
+    .refresh { background: #2a2f3a; color: var(--text); border: none; padding: 7px 14px; border-radius: 8px; cursor: pointer; font-size: 12.5px; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">📊</span>
+      <div>
+        <h1>Call Scorecards</h1>
+        <p class="subtitle">Every finished voice-agent call, graded the same way a call center grades a human agent</p>
+      </div>
+    </div>
+    <div class="controls">
+      <a class="link" href="/" style="margin-right: 8px;">← Voice agent demo</a>
+      <button class="refresh" id="refreshBtn">Refresh</button>
+    </div>
+  </header>
+
+  <main class="scorecards">
+    <p class="intro">
+      Same 4 buckets a call-center QA scorecard grades a human agent on. <b>Outcome</b> and
+      <b>Economics &amp; Reliability</b> are deterministic - read straight off the session, no LLM
+      involved. <b>Customer Experience</b> (CSAT/CES) and <b>Compliance</b> are judgment calls, so
+      they come from a post-call LLM-as-judge pass over the transcript + the tool-call log
+      (Claude Haiku 4.5 - see <code>src/scoring/judge.ts</code>). Cost is an estimate against
+      Deepgram's published per-minute pricing, not an invoice reconciliation.
+    </p>
+    <div class="buckets">
+      <span><b>Outcome</b> - did the job get done (FCR)</span>
+      <span><b>Economics &amp; Reliability</b> - speed, cost, uptime</span>
+      <span><b>Customer Experience</b> - CSAT + CES (effort)</span>
+      <span><b>Compliance</b> - accurate, on-brand</span>
+    </div>
+    <div class="table-scroll" id="tableWrap"></div>
+  </main>
+
+  <script type="module">
+    const tableWrap = document.getElementById('tableWrap');
+
+    function fmtDuration(ms) {
+      const s = Math.round(ms / 1000);
+      return `${Math.floor(s / 60)}m ${s % 60}s`;
+    }
+
+    function pill(ok, okLabel, badLabel, nullLabel) {
+      if (ok === null || ok === undefined) return `<span class="pill neutral">${nullLabel ?? 'n/a'}</span>`;
+      return `<span class="pill ${ok ? 'ok' : 'bad'}">${ok ? okLabel : badLabel}</span>`;
+    }
+
+    function scoreCell(score, rationale) {
+      if (score == null) return '<span class="pill neutral">not judged</span>';
+      const cls = `s${score}`;
+      return `<span class="score ${cls}">${score}/5</span>${rationale ? `<div class="detail" title="${rationale.replace(/"/g, '&quot;')}">${rationale}</div>` : ''}`;
+    }
+
+    function render(calls) {
+      if (!calls.length) {
+        tableWrap.innerHTML = '<div class="empty-state">No calls scored yet - connect to the voice agent demo, have a conversation, then disconnect. Scoring runs when the call ends.</div>';
+        return;
+      }
+      const rows = calls.map((c) => {
+        const started = new Date(c.startedAt).toLocaleString();
+        const sttLabel = c.listenModel === 'nova-3' ? 'Nova-3 (baseline)' : c.listenModel === 'flux-general-en' ? 'Flux' : c.listenModel;
+        const toolsCell = c.toolNames.length
+          ? c.toolNames.map((t) => `<span class="tool-tag">${t}</span>`).join('')
+          : '<span class="pill bad">None called</span>';
+        return `
+          <tr>
+            <td>${started}</td>
+            <td><span class="pill ${c.listenModel === 'nova-3' ? 'warn' : 'ok'}">${sttLabel}</span></td>
+            <td>${pill(c.taskCompleted, 'Booked', 'Not booked')}</td>
+            <td>${fmtDuration(c.durationMs)}</td>
+            <td class="wrap">${toolsCell}</td>
+            <td>${c.avgLatencyMs != null ? Math.round(c.avgLatencyMs) + ' ms' : '—'}</td>
+            <td>$${c.estimatedCostUsd.toFixed(4)}</td>
+            <td>${pill(!c.fellDown, 'Clean', 'Fell down')}${c.closeCode ? `<div class="detail">close ${c.closeCode}</div>` : ''}</td>
+            <td>${scoreCell(c.csatScore, c.csatRationale)}</td>
+            <td>${scoreCell(c.effortScore, c.effortRationale)}</td>
+            <td>${pill(c.hallucinationFlag === null ? null : !c.hallucinationFlag, 'Accurate', 'Inaccurate', 'not judged')}${c.hallucinationDetails ? `<div class="detail" title="${c.hallucinationDetails.replace(/"/g, '&quot;')}">${c.hallucinationDetails}</div>` : ''}</td>
+            <td>${pill(c.competitorMentionFlag === null ? null : !c.competitorMentionFlag, 'On-brand', 'Off-brand', 'not judged')}${c.competitorDetails ? `<div class="detail" title="${c.competitorDetails.replace(/"/g, '&quot;')}">${c.competitorDetails}</div>` : ''}</td>
+          </tr>`;
+      }).join('');
+
+      tableWrap.innerHTML = `
+        <table>
+          <thead>
+            <tr class="bucket-row">
+              <th colspan="2">Call</th>
+              <th colspan="3">Outcome (FCR)</th>
+              <th colspan="3">Economics &amp; Reliability</th>
+              <th colspan="2">Customer Experience</th>
+              <th colspan="2">Compliance</th>
+            </tr>
+            <tr>
+              <th>Started</th>
+              <th>STT Model</th>
+              <th>Booked?</th>
+              <th>Duration</th>
+              <th>Tools used</th>
+              <th>Latency</th>
+              <th>Cost (est.)</th>
+              <th>Reliability</th>
+              <th>CSAT</th>
+              <th>Effort (CES)</th>
+              <th>Accuracy</th>
+              <th>On-brand</th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>`;
+    }
+
+    async function load() {
+      tableWrap.innerHTML = '<div class="empty-state">Loading…</div>';
+      try {
+        const res = await fetch('/api/calls');
+        const data = await res.json();
+        render(data.calls ?? []);
+      } catch (err) {
+        tableWrap.innerHTML = `<div class="empty-state">Failed to load: ${err}</div>`;
+      }
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', load);
+    load();
+  </script>
+</body>
+</html>

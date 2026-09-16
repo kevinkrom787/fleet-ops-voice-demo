@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Track A / B — Auth Demo</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/styles.css" />
+  <style>
+    .layout { grid-template-columns: 1fr 1fr; }
+    form { display: flex; flex-direction: column; gap: 8px; margin-bottom: 14px; }
+    input { background: #101217; border: 1px solid var(--panel-border); color: var(--text); padding: 8px 10px; border-radius: 6px; font-size: 13px; }
+    label { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.04em; }
+    button.action { background: var(--accent); color: #1a1400; border: none; font-weight: 600; padding: 8px 14px; border-radius: 8px; cursor: pointer; font-size: 13px; }
+    button.action.secondary { background: #2a2f3a; color: var(--text); }
+    button.action.danger { background: var(--danger); color: #2a0000; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    pre.result { white-space: pre-wrap; word-break: break-word; background: #101217; border: 1px solid var(--panel-border); border-radius: 8px; padding: 12px; font-size: 12px; min-height: 60px; }
+    a.link { color: var(--accent); }
+    hr { border: none; border-top: 1px solid var(--panel-border); margin: 16px 0; }
+  </style>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">🔐</span>
+      <div>
+        <h1>Track A / B — Auth Demo</h1>
+        <p class="subtitle">WorkOS AuthKit vs. hand-rolled email+password, side by side</p>
+      </div>
+    </div>
+    <div class="controls"><a class="link" href="/">← Voice agent demo</a></div>
+  </header>
+
+  <main class="layout">
+    <section class="panel">
+      <h2>Track A — WorkOS AuthKit</h2>
+      <p style="color: var(--muted); font-size: 13px;">No form here on purpose - AuthKit's hosted page IS the login UI.</p>
+      <div class="row">
+        <a class="action" href="/login" style="text-decoration:none; display:inline-block;">Sign in with AuthKit →</a>
+        <button class="action secondary" id="wosWhoami">GET /whoami</button>
+        <button class="action danger" id="wosLogout">Logout</button>
+      </div>
+      <hr />
+      <label for="switchOrgId">Switch to organizationId (must be an org this user belongs to)</label>
+      <div class="row">
+        <input id="switchOrgId" placeholder="org_..." style="flex:1;" />
+        <button class="action secondary" id="wosSwitch">POST /switch-org</button>
+      </div>
+      <pre class="result" id="wosResult">—</pre>
+    </section>
+
+    <section class="panel">
+      <h2>Track B — DIY email + password</h2>
+      <form id="signupForm">
+        <label>Signup</label>
+        <input name="email" type="email" placeholder="email" required />
+        <input name="password" type="password" placeholder="password (8+ chars)" autocomplete="new-password" required />
+        <input name="organizationName" placeholder="organization name (optional)" />
+        <button class="action" type="submit">POST /diy/signup</button>
+      </form>
+      <form id="loginForm">
+        <label>Login</label>
+        <input name="email" type="email" placeholder="email" required />
+        <input name="password" type="password" placeholder="password" autocomplete="current-password" required />
+        <button class="action" type="submit">POST /diy/login</button>
+      </form>
+      <div class="row">
+        <button class="action secondary" id="diyWhoami">GET /diy/whoami</button>
+        <button class="action danger" id="diyLogout">POST /diy/logout</button>
+      </div>
+      <pre class="result" id="diyResult">—</pre>
+    </section>
+  </main>
+
+  <script type="module">
+    const wosResult = document.getElementById('wosResult');
+    const diyResult = document.getElementById('diyResult');
+    const show = (el, data) => { el.textContent = JSON.stringify(data, null, 2); };
+
+    document.getElementById('wosWhoami').addEventListener('click', async () => {
+      const res = await fetch('/whoami');
+      show(wosResult, await res.json());
+    });
+    document.getElementById('wosLogout').addEventListener('click', async () => {
+      const res = await fetch('/logout', { method: 'POST' });
+      const data = await res.json();
+      show(wosResult, data);
+      if (data.logoutUrl) location.href = data.logoutUrl;
+    });
+    document.getElementById('wosSwitch').addEventListener('click', async () => {
+      const organizationId = document.getElementById('switchOrgId').value.trim();
+      const res = await fetch('/switch-org', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ organizationId }),
+      });
+      show(wosResult, await res.json());
+    });
+
+    document.getElementById('signupForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(e.target));
+      const res = await fetch('/diy/signup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      show(diyResult, await res.json());
+    });
+    document.getElementById('loginForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const body = Object.fromEntries(new FormData(e.target));
+      const res = await fetch('/diy/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+      show(diyResult, await res.json());
+    });
+    document.getElementById('diyWhoami').addEventListener('click', async () => {
+      const res = await fetch('/diy/whoami');
+      show(diyResult, await res.json());
+    });
+    document.getElementById('diyLogout').addEventListener('click', async () => {
+      await fetch('/diy/logout', { method: 'POST' });
+      show(diyResult, { loggedOut: true });
+    });
+  </script>
+</body>
+</html>

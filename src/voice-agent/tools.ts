@@ -1,11 +1,18 @@
-import { createTool } from '@mastra/core/tools';
 import { z } from 'zod';
-import { leadMemory, WORKING_MEMORY_TEMPLATE } from './memory.js';
+import { defineTool } from './tool.js';
+import { getWorkingMemory, updateWorkingMemory, WORKING_MEMORY_TEMPLATE } from './memory.js';
 import { calendlyConfigFromEnv, createBookingLink, listAvailableSlots } from '../calendly.js';
+import { getMostRecentAccount } from '../workos/db.js';
 
 export interface SessionHooks {
-  threadId: string;
   resourceId: string;
+  /**
+   * Fired after a successful scheduleEstimate call. agent.ts wires this to
+   * DeepgramVoiceAgent.updatePrompt() - a mid-session prompt update (see the
+   * comment on updatePrompt() in deepgram-voice.ts: it *appends*, not replaces),
+   * so the rest of the call gets one extra rule without resending the whole prompt.
+   */
+  onBooked?: () => void;
 }
 
 function setLine(lines: string[], label: string, value?: string) {
@@ -25,12 +32,10 @@ function getLine(lines: string[], label: string): string {
 export function createSessionTools(hooks: SessionHooks) {
   const calendlyConfig = calendlyConfigFromEnv();
 
-  const readMemory = () =>
-    leadMemory.getWorkingMemory({ threadId: hooks.threadId, resourceId: hooks.resourceId });
-  const writeMemory = (workingMemory: string) =>
-    leadMemory.updateWorkingMemory({ threadId: hooks.threadId, resourceId: hooks.resourceId, workingMemory });
+  const readMemory = async () => getWorkingMemory(hooks.resourceId);
+  const writeMemory = async (workingMemory: string) => updateWorkingMemory(hooks.resourceId, workingMemory);
 
-  const saveLeadInfo = createTool({
+  const saveLeadInfo = defineTool({
     id: 'saveLeadInfo',
     description:
       'Save or update the caller details. Only call this for a piece of information the caller has ' +
@@ -55,7 +60,7 @@ export function createSessionTools(hooks: SessionHooks) {
     },
   });
 
-  const checkAvailability = createTool({
+  const checkAvailability = defineTool({
     id: 'checkAvailability',
     description:
       'Look up open appointment slots on the Black Bear Exteriors free-estimate calendar for the next ' +
@@ -72,7 +77,7 @@ export function createSessionTools(hooks: SessionHooks) {
     },
   });
 
-  const scheduleEstimate = createTool({
+  const scheduleEstimate = defineTool({
     id: 'scheduleEstimate',
     description:
       "Finalize the appointment once the caller has picked a time from checkAvailability's results. " +
@@ -108,6 +113,8 @@ export function createSessionTools(hooks: SessionHooks) {
       setLine(lines, 'Booking link', bookingUrl);
       await writeMemory(lines.join('\n'));
 
+      hooks.onBooked?.();
+
       return {
         booked: true,
         bookingUrl,
@@ -116,5 +123,50 @@ export function createSessionTools(hooks: SessionHooks) {
     },
   });
 
-  return { saveLeadInfo, checkAvailability, scheduleEstimate };
+  // --- Track C x Track A: a voice tool that reads Track A's WorkOS-backed DB. ---
+  // This demo has no real per-call caller auth (nobody logs into a phone call),
+  // so it reads whoever most recently signed in via /login - a stand-in for
+  // "resolve the caller's identity" (in production: phone-number lookup, a
+  // PIN, or this call happening inside an already-authenticated app session).
+  // The point being demoed is mechanical: a Deepgram function-call round trip
+  // reading a real row that only exists because Track A's OAuth flow ran.
+  const whatOrgAmIIn = defineTool({
+    id: 'whatOrgAmIIn',
+    description:
+      "Look up which organization the currently-signed-in WorkOS account belongs to. Use this if the " +
+      'caller asks something like "what account/org is this call under" or "who am I signed in as."',
+    inputSchema: z.object({}),
+    outputSchema: z.object({
+      found: z.boolean(),
+      email: z.string().optional(),
+      organizationId: z.string().optional(),
+    }),
+    execute: async () => {
+      const account = getMostRecentAccount();
+      if (!account) return { found: false };
+      return { found: true, email: account.email, organizationId: account.workos_organization_id ?? undefined };
+    },
+  });
+
+  // --- A second, unrelated tool: demonstrates multiple tools coexisting in one
+  // agent.think.functions array, each independently dispatched by name. ---
+  const flagForHumanFollowUp = defineTool({
+    id: 'flagForHumanFollowUp',
+    description:
+      'Flag this call for a human teammate to follow up on - use when the caller asks for something ' +
+      "outside booking (e.g. an urgent safety issue, a complaint) that shouldn't just be brushed off.",
+    inputSchema: z.object({
+      reason: z.string().describe('One sentence on why a human should follow up'),
+    }),
+    outputSchema: z.object({ flagged: z.boolean(), flagId: z.string() }),
+    execute: async (inputData) => {
+      const flagId = `flag_${Date.now()}`;
+      // Demo stub - a real implementation would write to a queue/CRM. Logged
+      // here so you can see the tool round trip happen in the server console.
+      console.log(`[flagForHumanFollowUp] ${flagId}: ${inputData.reason}`);
+      return { flagged: true, flagId };
+    },
+  });
+
+  return { saveLeadInfo, checkAvailability, scheduleEstimate, whatOrgAmIIn, flagForHumanFollowUp };
 }
